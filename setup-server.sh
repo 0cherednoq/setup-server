@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Быстрая настройка сервера на Ubuntu: Docker, Node, uv, bun, Go, pm2.
 # Системные библиотеки для Firefox/Camoufox ставятся в конце (отдельный шаг apt).
-# Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node]
+# Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node] [--skip-apt-update]
 # Без chmod: sudo bash setup-server.sh
 
 set -euo pipefail
@@ -10,14 +10,19 @@ set -euo pipefail
 
 SKIP_DOCKER=0
 SKIP_NODE=0
+# Не вызывать apt-get update (быстрее, если индексы уже свежие; при ошибках apt — уберите флаг)
+SKIP_APT_UPDATE=0
+# Уже выполняли apt-get update в этом запуске скрипта
+APT_LISTS_REFRESHED=0
 
 for arg in "$@"; do
   case "$arg" in
     --skip-docker) SKIP_DOCKER=1 ;;
     --skip-node) SKIP_NODE=1 ;;
+    --skip-apt-update) SKIP_APT_UPDATE=1 ;;
     *)
       printf '%s\n' "Неизвестный аргумент: $arg" >&2
-      printf '%s\n' "Использование: $0 [--skip-docker] [--skip-node]" >&2
+      printf '%s\n' "Использование: $0 [--skip-docker] [--skip-node] [--skip-apt-update]" >&2
       exit 1
       ;;
   esac
@@ -108,11 +113,14 @@ go_arch_suffix() {
   esac
 }
 
-# Один раз обновить индексы apt (перед любыми установками)
-apt_refresh() {
+# Обновить индексы apt не чаще одного раза за запуск; не вызывается, если ставить нечего или задан --skip-apt-update
+ensure_apt_lists() {
   export DEBIAN_FRONTEND=noninteractive
+  [[ "$SKIP_APT_UPDATE" == 1 ]] && return 0
+  [[ "$APT_LISTS_REFRESHED" == 1 ]] && return 0
   section "APT: обновление индексов"
   apt-get update -qq
+  APT_LISTS_REFRESHED=1
   row_note "готово"
 }
 
@@ -133,6 +141,7 @@ install_base_apt_packages() {
     fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
+    ensure_apt_lists
     printf '\n%b  → apt install:%b %s\n' "$B" "$N" "${missing[*]}"
     apt-get install -y "${missing[@]}"
   fi
@@ -155,6 +164,7 @@ install_camoufox_system_libs() {
     fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
+    ensure_apt_lists
     printf '\n%b  → apt install:%b %s\n' "$B" "$N" "${missing[*]}"
     apt-get install -y "${missing[@]}"
   fi
@@ -206,6 +216,7 @@ install_node() {
   fi
   row_need "node + npm — установка (NodeSource)"
   export DEBIAN_FRONTEND=noninteractive
+  ensure_apt_lists
   curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
   apt-get install -y nodejs
   row_ok "node + npm установлены"
@@ -328,7 +339,6 @@ print_summary() {
 # --- точка входа ---
 require_ubuntu
 printf '\n%b Ubuntu server setup%b  %s\n' "$C$B" "$N" "${PRETTY_NAME:-Ubuntu}"
-apt_refresh
 install_base_apt_packages
 
 install_docker
