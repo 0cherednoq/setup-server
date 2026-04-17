@@ -3,7 +3,7 @@
 # Системные библиотеки для запуска браузера (Camoufox и т.п. на базе Firefox) — без pip-пакетов.
 # Запуск без chmod +x: sudo bash setup-server.sh [...]
 # С chmod +x можно: sudo ./setup-server.sh [...]
-# Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node] [--no-chromium]
+# Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node]
 # Требуется root (EUID 0). При вызове через sudo uv/bun ставятся в домашний каталог вызвавшего пользователя.
 
 set -euo pipefail
@@ -13,16 +13,14 @@ set -euo pipefail
 
 SKIP_DOCKER=0
 SKIP_NODE=0
-INSTALL_CHROMIUM=1
 
 for arg in "$@"; do
   case "$arg" in
     --skip-docker) SKIP_DOCKER=1 ;;
     --skip-node) SKIP_NODE=1 ;;
-    --no-chromium) INSTALL_CHROMIUM=0 ;;
     *)
       echo "Неизвестный аргумент: $arg" >&2
-      echo "Использование: $0 [--skip-docker] [--skip-node] [--no-chromium]" >&2
+      echo "Использование: $0 [--skip-docker] [--skip-node]" >&2
       exit 1
       ;;
   esac
@@ -124,17 +122,6 @@ install_native_batch() {
     apt-get install -y "${missing[@]}"
   else
     echo "Все перечисленные apt-пакеты уже установлены — пропуск."
-  fi
-
-  if [[ "$INSTALL_CHROMIUM" == 1 ]] && ! dpkg_installed chromium; then
-    echo "Пробую установить chromium (опционально, если нужен Chromium на сервере)…"
-    if ! apt-get install -y chromium; then
-      echo "Не удалось установить chromium (включите universe или используйте --no-chromium)." >&2
-    fi
-  elif [[ "$INSTALL_CHROMIUM" != 1 ]]; then
-    echo "Установка chromium отключена (--no-chromium)."
-  else
-    echo "Пакет chromium уже установлен."
   fi
 }
 
