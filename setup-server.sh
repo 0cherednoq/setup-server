@@ -104,7 +104,8 @@ install_native_batch() {
   apt-get update -qq
 
   # Системные библиотеки для Firefox/Camoufox (имена зависят от версии Ubuntu, см. camoufox_browser_apt_pkgs)
-  local pkgs=(curl ca-certificates gnupg lsb-release git build-essential)
+  # unzip нужен официальному установщику bun (иначе «error: unzip is required to install bun»)
+  local pkgs=(curl ca-certificates gnupg lsb-release git build-essential unzip)
   local bl
   while IFS= read -r bl; do
     [[ -n "$bl" ]] && pkgs+=("$bl")
