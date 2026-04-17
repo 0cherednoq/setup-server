@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Быстрая настройка сервера на Ubuntu: инструменты разработки, Docker, Node, uv, bun, Go.
-# Системные библиотеки для запуска браузера (Camoufox и т.п. на базе Firefox) — без pip-пакетов.
-# Запуск без chmod +x: sudo bash setup-server.sh [...]
-# С chmod +x можно: sudo ./setup-server.sh [...]
+# Быстрая настройка сервера на Ubuntu: Docker, Node, uv, bun, Go, pm2.
+# Системные библиотеки для Firefox/Camoufox ставятся в конце (отдельный шаг apt).
 # Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node]
-# Требуется root (EUID 0). При вызове через sudo uv/bun ставятся в домашний каталог вызвавшего пользователя.
+# Без chmod: sudo bash setup-server.sh
 
 set -euo pipefail
 
-# Версия Go (linux-amd64/arm64), см. https://go.dev/dl/
 : "${GO_VERSION:=1.23.5}"
 
 SKIP_DOCKER=0
@@ -19,19 +16,18 @@ for arg in "$@"; do
     --skip-docker) SKIP_DOCKER=1 ;;
     --skip-node) SKIP_NODE=1 ;;
     *)
-      echo "Неизвестный аргумент: $arg" >&2
-      echo "Использование: $0 [--skip-docker] [--skip-node]" >&2
+      printf '%s\n' "Неизвестный аргумент: $arg" >&2
+      printf '%s\n' "Использование: $0 [--skip-docker] [--skip-node]" >&2
       exit 1
       ;;
   esac
 done
 
 if [[ "${EUID:-}" -ne 0 ]]; then
-  echo "Запустите от root, например: sudo bash $0" >&2
+  printf '%s\n' "Запустите от root: sudo bash $0" >&2
   exit 1
 fi
 
-# Целевой пользователь для uv/bun (при sudo — владелец сессии, иначе root)
 if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
   TARGET_USER="$SUDO_USER"
   TARGET_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
@@ -40,15 +36,29 @@ else
   TARGET_HOME=/root
 fi
 
+# Цвета только при интерактивном терминале
+setup_colors() {
+  if [[ -t 1 ]]; then
+    B=$'\033[1m'
+    D=$'\033[2m'
+    G=$'\033[32m'
+    R=$'\033[31m'
+    Y=$'\033[33m'
+    C=$'\033[36m'
+    N=$'\033[0m'
+  else
+    B='' D='' G='' R='' Y='' C='' N=''
+  fi
+}
+setup_colors
+
 have_cmd() { command -v "$1" &>/dev/null; }
 
-# Проверка установленного deb-пакета
 dpkg_installed() {
   local pkg="$1"
   dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'
 }
 
-# Выполнить команду от имени целевого пользователя с корректным HOME
 run_as_target() {
   if [[ "$TARGET_USER" == root ]]; then
     HOME="$TARGET_HOME" "$@"
@@ -57,25 +67,30 @@ run_as_target() {
   fi
 }
 
-# Поддерживается только Ubuntu (apt)
+die() { printf '%b%s%b\n' "$R" "$*" "$N" >&2; exit 1; }
+
+section() {
+  printf '\n%b── %s ──%b\n' "$C$B" "$*" "$N"
+}
+
+# [+] есть (зелёный), [-] нет (красный)
+row_ok() { printf '  %b[+]%b %s\n' "$G" "$N" "$*"; }
+row_need() { printf '  %b[-]%b %s\n' "$R" "$N" "$*"; }
+row_skip() { printf '  %b·%b %s\n' "$Y" "$N" "$*"; }
+row_note() { printf '  %b%s%b\n' "$D" "$*" "$N"; }
+
 require_ubuntu() {
   if [[ ! -f /etc/os-release ]]; then
-    echo "Не найден /etc/os-release." >&2
-    exit 1
+    die "Не найден /etc/os-release."
   fi
   # shellcheck source=/dev/null
   . /etc/os-release
   if [[ "${ID:-}" != "ubuntu" ]]; then
-    echo "Поддерживается только Ubuntu (ожидается ID=ubuntu в /etc/os-release). Сейчас: ID=${ID:-?}" >&2
-    exit 1
+    die "Нужен Ubuntu (ID=ubuntu). Сейчас: ID=${ID:-?}"
   fi
-  if ! have_cmd apt-get; then
-    echo "Не найден apt-get." >&2
-    exit 1
-  fi
+  have_cmd apt-get || die "Не найден apt-get."
 }
 
-# На Ubuntu 24.04+ часть библиотек переименована (t64); libasound2 — только виртуальный пакет.
 camoufox_browser_apt_pkgs() {
   local maj="${VERSION_ID%%.*}"
   if [[ "$maj" =~ ^[0-9]+$ ]] && [[ $((10#$maj)) -ge 24 ]]; then
@@ -89,148 +104,172 @@ go_arch_suffix() {
   case "$(uname -m)" in
     x86_64) echo amd64 ;;
     aarch64 | arm64) echo arm64 ;;
-    *)
-      echo "Неподдерживаемая архитектура: $(uname -m)" >&2
-      exit 1
-      ;;
+    *) die "Неподдерживаемая архитектура: $(uname -m)" ;;
   esac
 }
 
-# --- Фаза 1: базовые пакеты + библиотеки для Firefox/Camoufox (системные, без Python) ---
-install_native_batch() {
-  echo "=== Фаза 1: базовые пакеты и системные библиотеки для браузера (Camoufox и др.) ==="
-
+# Один раз обновить индексы apt (перед любыми установками)
+apt_refresh() {
   export DEBIAN_FRONTEND=noninteractive
+  section "APT: обновление индексов"
   apt-get update -qq
+  row_note "готово"
+}
 
-  # Системные библиотеки для Firefox/Camoufox (имена зависят от версии Ubuntu, см. camoufox_browser_apt_pkgs)
-  # unzip нужен официальному установщику bun (иначе «error: unzip is required to install bun»)
-  local pkgs=(curl ca-certificates gnupg lsb-release git build-essential unzip)
-  local bl
+# Базовые пакеты (без библиотек Camoufox — они в конце)
+install_base_apt_packages() {
+  section "Базовые пакеты"
+  local pkgs=(
+    curl ca-certificates gnupg lsb-release git
+    build-essential unzip
+  )
+  local missing=() p
+  for p in "${pkgs[@]}"; do
+    if dpkg_installed "$p"; then
+      row_ok "$p"
+    else
+      row_need "$p"
+      missing+=("$p")
+    fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    printf '\n%b  → apt install:%b %s\n' "$B" "$N" "${missing[*]}"
+    apt-get install -y "${missing[@]}"
+  fi
+}
+
+# Последний шаг apt: только библиотеки под Firefox/Camoufox
+install_camoufox_system_libs() {
+  section "Системные библиотеки для Camoufox (Firefox)"
+  local pkgs=() bl missing=() p
   while IFS= read -r bl; do
     [[ -n "$bl" ]] && pkgs+=("$bl")
   done < <(camoufox_browser_apt_pkgs)
 
-  local missing=()
   for p in "${pkgs[@]}"; do
-    if ! dpkg_installed "$p"; then
+    if dpkg_installed "$p"; then
+      row_ok "$p"
+    else
+      row_need "$p"
       missing+=("$p")
     fi
   done
-
   if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "Устанавливаю (apt): ${missing[*]}"
+    printf '\n%b  → apt install:%b %s\n' "$B" "$N" "${missing[*]}"
     apt-get install -y "${missing[@]}"
-  else
-    echo "Все перечисленные apt-пакеты уже установлены — пропуск."
   fi
 }
 
-# --- Фаза 2a: Docker (официальный скрипт) ---
 install_docker() {
-  [[ "$SKIP_DOCKER" == 1 ]] && { echo "Пропуск Docker (--skip-docker)."; return 0; }
-  if have_cmd docker; then
-    echo "Docker уже в PATH — пропуск установки."
+  section "Docker"
+  if [[ "$SKIP_DOCKER" == 1 ]]; then
+    row_skip "пропуск (--skip-docker)"
     return 0
   fi
-  echo "=== Установка Docker (get.docker.com) ==="
+  if have_cmd docker; then
+    row_ok "docker (уже в PATH)"
+    return 0
+  fi
+  row_need "docker — установка (get.docker.com)"
   curl -fsSL https://get.docker.com | sh
+  row_ok "docker установлен"
 }
 
-# Доступ к docker.sock без sudo: пользователь должен быть в группе docker (после — новый вход или newgrp docker)
 ensure_docker_group() {
-  if ! have_cmd docker; then
-    return 0
-  fi
-  if ! getent group docker &>/dev/null; then
+  section "Права Docker (группа docker)"
+  if ! have_cmd docker || ! getent group docker &>/dev/null; then
+    row_note "docker или группа docker недоступны — шаг пропущен"
     return 0
   fi
   if [[ "$TARGET_USER" == root ]]; then
+    row_note "целевой пользователь root — добавление в группу не требуется"
     return 0
   fi
   if id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker; then
-    echo "Пользователь $TARGET_USER уже в группе docker."
+    row_ok "пользователь $TARGET_USER уже в группе docker"
     return 0
   fi
-  echo "=== Docker: добавляю пользователя $TARGET_USER в группу docker ==="
+  row_need "добавить $TARGET_USER в группу docker"
   usermod -aG docker "$TARGET_USER"
-  echo "Чтобы заработало docker ps без sudo: выйдите из сессии и войдите снова (в WSL: wsl --shutdown с Windows), либо выполните: newgrp docker"
+  row_ok "группа обновлена (нужен новый вход в сессию или: newgrp docker)"
 }
 
-# --- Фаза 2b: Node.js LTS + npm ---
 install_node() {
-  [[ "$SKIP_NODE" == 1 ]] && { echo "Пропуск Node.js (--skip-node)."; return 0; }
-  if have_cmd node && have_cmd npm; then
-    echo "Node.js и npm уже доступны — пропуск установки Node."
+  section "Node.js LTS + npm"
+  if [[ "$SKIP_NODE" == 1 ]]; then
+    row_skip "пропуск (--skip-node)"
     return 0
   fi
-
-  echo "=== Установка Node.js LTS (NodeSource) ==="
+  if have_cmd node && have_cmd npm; then
+    row_ok "node + npm"
+    return 0
+  fi
+  row_need "node + npm — установка (NodeSource)"
   export DEBIAN_FRONTEND=noninteractive
   curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
   apt-get install -y nodejs
+  row_ok "node + npm установлены"
 }
 
 install_pm2() {
-  [[ "$SKIP_NODE" == 1 ]] && return 0
+  section "pm2"
+  if [[ "$SKIP_NODE" == 1 ]]; then
+    row_skip "пропуск (вместе с Node)"
+    return 0
+  fi
   if have_cmd pm2; then
-    echo "pm2 уже установлен — пропуск."
+    row_ok "pm2"
     return 0
   fi
   if ! have_cmd npm; then
-    echo "npm не найден — pm2 не устанавливаю." >&2
+    row_need "npm нет — pm2 не ставим"
     return 0
   fi
-  echo "=== Установка pm2 (глобально через npm) ==="
-  npm install -g pm2
+  row_need "pm2 — npm install -g"
+  npm install -g pm2 --silent --no-fund --no-audit 2>/dev/null || npm install -g pm2 --silent
+  row_ok "pm2"
 }
 
-# --- Фаза 3: параллельно uv, bun, Go (без apt внутри) ---
+# Тихая установка в фоне; статус — после wait
 job_install_uv() {
-  if [[ -x "${TARGET_HOME}/.local/bin/uv" ]]; then
-    echo "[uv] уже установлен (${TARGET_HOME}/.local/bin/uv)."
-    return 0
-  fi
-  echo "[uv] установка через astral.sh…"
-  run_as_target bash -c 'set -euo pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh'
+  [[ -x "${TARGET_HOME}/.local/bin/uv" ]] && return 0
+  run_as_target bash -c 'set -euo pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh' &>/dev/null
 }
 
 job_install_bun() {
-  if [[ -x "${TARGET_HOME}/.bun/bin/bun" ]]; then
-    echo "[bun] уже установлен (${TARGET_HOME}/.bun/bin/bun)."
-    return 0
-  fi
-  echo "[bun] установка через bun.sh…"
-  run_as_target bash -c 'set -euo pipefail; curl -fsSL https://bun.sh/install | bash'
+  [[ -x "${TARGET_HOME}/.bun/bin/bun" ]] && return 0
+  run_as_target bash -c 'set -euo pipefail; curl -fsSL https://bun.sh/install | bash' &>/dev/null
 }
 
 job_install_go() {
-  if PATH="/usr/local/go/bin:/usr/local/bin:${PATH}" command -v go &>/dev/null; then
-    echo "[go] уже доступен в PATH — пропуск установки в /usr/local/go."
-    return 0
-  fi
+  PATH="/usr/local/go/bin:/usr/local/bin:${PATH}" command -v go &>/dev/null && return 0
   local suffix arch tarball url tmpdir
   suffix="$(go_arch_suffix)"
   arch="linux-${suffix}"
   tarball="go${GO_VERSION}.${arch}.tar.gz"
   url="https://go.dev/dl/${tarball}"
   tmpdir="$(mktemp -d)"
-  echo "[go] скачивание ${url}…"
   curl -fsSL "$url" -o "${tmpdir}/${tarball}"
   rm -rf /usr/local/go
   tar -C /usr/local -xzf "${tmpdir}/${tarball}"
   rm -rf "${tmpdir}"
   ln -sf /usr/local/go/bin/go /usr/local/bin/go 2>/dev/null || true
   ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt 2>/dev/null || true
-  echo "[go] установлен в /usr/local/go (версия ${GO_VERSION})."
 }
 
 run_parallel_tooling() {
-  echo "=== Фаза 3: параллельная установка uv, bun, Go ==="
+  section "uv · bun · Go (параллельно)"
+  local had_uv had_bun had_go
+  had_uv=0; [[ -x "${TARGET_HOME}/.local/bin/uv" ]] && had_uv=1
+  had_bun=0; [[ -x "${TARGET_HOME}/.bun/bin/bun" ]] && had_bun=1
+  had_go=0; PATH="/usr/local/go/bin:/usr/local/bin:${PATH}" command -v go &>/dev/null && had_go=1
+
+  if [[ "$had_uv" == 1 ]]; then row_ok "uv"; else row_need "uv"; fi
+  if [[ "$had_bun" == 1 ]]; then row_ok "bun"; else row_need "bun"; fi
+  if [[ "$had_go" == 1 ]]; then row_ok "go"; else row_need "go"; fi
+
   export PATH="${TARGET_HOME}/.local/bin:${TARGET_HOME}/.bun/bin:/usr/local/go/bin:/usr/local/bin:${PATH}"
-
   local pids=() ec=0
-
   ( job_install_uv ) &
   pids+=("$!")
   ( job_install_bun ) &
@@ -238,23 +277,29 @@ run_parallel_tooling() {
   ( job_install_go ) &
   pids+=("$!")
 
+  if [[ "$had_uv$had_bun$had_go" != "111" ]]; then
+    printf '\n%b  … загрузка и установка%b\n' "$D" "$N"
+  fi
   for pid in "${pids[@]}"; do
     wait "$pid" || ec=1
   done
+  [[ "$ec" -eq 0 ]] || die "Ошибка при установке uv / bun / Go"
 
-  if [[ "$ec" -ne 0 ]]; then
-    echo "Одна из параллельных установок завершилась с ошибкой." >&2
-    exit 1
+  if [[ -x "${TARGET_HOME}/.local/bin/uv" ]] && [[ -x "${TARGET_HOME}/.bun/bin/bun" ]] &&
+    PATH="/usr/local/go/bin:/usr/local/bin:${PATH}" command -v go &>/dev/null; then
+    row_ok "uv · bun · Go — готово"
+  else
+    row_need "после установки инструменты не найдены"
+    die "uv / bun / Go"
   fi
 }
 
-# PATH для uv/bun/go во всех новых интерактивных сессиях (и login), без ручного export
 PROFILE_D_PATH=/etc/profile.d/setup-server-dev-path.sh
+
 install_profile_d_path() {
-  echo "=== Запись PATH в ${PROFILE_D_PATH} (uv, bun, Go) ==="
+  section "PATH (профиль)"
   cat >"${PROFILE_D_PATH}" <<'EOF'
-# Создано setup-server.sh: uv (~/.local/bin), bun (~/.bun/bin), Go (/usr/local/go/bin)
-# Используется $HOME текущего пользователя при входе в систему.
+# setup-server.sh: uv, bun, Go в PATH для каждого пользователя
 __setup_server_prepend_path() {
   local d="$1"
   [ -d "$d" ] || return 0
@@ -270,23 +315,22 @@ export PATH
 unset -f __setup_server_prepend_path 2>/dev/null || true
 EOF
   chmod 644 "${PROFILE_D_PATH}"
+  row_ok "записано: ${PROFILE_D_PATH}"
 }
 
-print_path_hints() {
-  echo ""
-  echo "=== Готово ==="
-  echo "PATH для uv / bun / Go записан в: ${PROFILE_D_PATH}"
-  echo "В этом же окне терминала выполните один раз:"
-  echo "  source ${PROFILE_D_PATH}"
-  echo "После этого: uv --version, bun --version"
-  echo ""
-  echo "Пакеты camoufox/pydoll в этот скрипт не входят — установите их в своём venv при необходимости."
-  echo "Системные библиотеки для Firefox (Camoufox) см.: https://camoufox.com/python/installation/"
+print_summary() {
+  section "Готово"
+  row_note "в этом терминале один раз: source ${PROFILE_D_PATH}"
+  row_note "затем: uv --version | bun --version | go version"
+  printf '\n'
 }
 
-# --- main ---
+# --- точка входа ---
 require_ubuntu
-install_native_batch
+printf '\n%b Ubuntu server setup%b  %s\n' "$C$B" "$N" "${PRETTY_NAME:-Ubuntu}"
+apt_refresh
+install_base_apt_packages
+
 install_docker
 ensure_docker_group
 install_node
@@ -295,6 +339,7 @@ run_parallel_tooling
 
 export PATH="${TARGET_HOME}/.local/bin:${TARGET_HOME}/.bun/bin:/usr/local/go/bin:/usr/local/bin:${PATH}"
 install_pm2
-
 install_profile_d_path
-print_path_hints
+
+install_camoufox_system_libs
+print_summary
