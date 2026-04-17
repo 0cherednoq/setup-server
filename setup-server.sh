@@ -77,6 +77,16 @@ require_ubuntu() {
   fi
 }
 
+# На Ubuntu 24.04+ часть библиотек переименована (t64); libasound2 — только виртуальный пакет.
+camoufox_browser_apt_pkgs() {
+  local maj="${VERSION_ID%%.*}"
+  if [[ "$maj" =~ ^[0-9]+$ ]] && [[ $((10#$maj)) -ge 24 ]]; then
+    printf '%s\n' libgtk-3-0t64 libx11-xcb1 libasound2t64
+  else
+    printf '%s\n' libgtk-3-0 libx11-xcb1 libasound2
+  fi
+}
+
 go_arch_suffix() {
   case "$(uname -m)" in
     x86_64) echo amd64 ;;
@@ -95,12 +105,12 @@ install_native_batch() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
 
-  # libgtk-3-0, libx11-xcb1, libasound2 — как в документации Camoufox для Debian/Ubuntu
-  local pkgs=(
-    curl ca-certificates gnupg lsb-release git
-    build-essential
-    libgtk-3-0 libx11-xcb1 libasound2
-  )
+  # Системные библиотеки для Firefox/Camoufox (имена зависят от версии Ubuntu, см. camoufox_browser_apt_pkgs)
+  local pkgs=(curl ca-certificates gnupg lsb-release git build-essential)
+  local bl
+  while IFS= read -r bl; do
+    [[ -n "$bl" ]] && pkgs+=("$bl")
+  done < <(camoufox_browser_apt_pkgs)
 
   local missing=()
   for p in "${pkgs[@]}"; do
