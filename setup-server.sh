@@ -2,6 +2,7 @@
 # Быстрая настройка сервера на Ubuntu: Docker, Node, uv, bun, Go, pm2.
 # Системные библиотеки для Firefox/Camoufox ставятся в конце (отдельный шаг apt).
 # Запуск: sudo bash setup-server.sh [--skip-docker] [--skip-node] [--skip-apt-update]
+# Из curl (флаги только после «bash -s --»): curl -fsSL URL | sudo bash -s -- --skip-apt-update
 # Без chmod: sudo bash setup-server.sh
 
 set -euo pipefail
