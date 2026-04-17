@@ -137,6 +137,26 @@ install_docker() {
   curl -fsSL https://get.docker.com | sh
 }
 
+# Доступ к docker.sock без sudo: пользователь должен быть в группе docker (после — новый вход или newgrp docker)
+ensure_docker_group() {
+  if ! have_cmd docker; then
+    return 0
+  fi
+  if ! getent group docker &>/dev/null; then
+    return 0
+  fi
+  if [[ "$TARGET_USER" == root ]]; then
+    return 0
+  fi
+  if id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker; then
+    echo "Пользователь $TARGET_USER уже в группе docker."
+    return 0
+  fi
+  echo "=== Docker: добавляю пользователя $TARGET_USER в группу docker ==="
+  usermod -aG docker "$TARGET_USER"
+  echo "Чтобы заработало docker ps без sudo: выйдите из сессии и войдите снова (в WSL: wsl --shutdown с Windows), либо выполните: newgrp docker"
+}
+
 # --- Фаза 2b: Node.js LTS + npm ---
 install_node() {
   [[ "$SKIP_NODE" == 1 ]] && { echo "Пропуск Node.js (--skip-node)."; return 0; }
@@ -228,12 +248,37 @@ run_parallel_tooling() {
   fi
 }
 
+# PATH для uv/bun/go во всех новых интерактивных сессиях (и login), без ручного export
+PROFILE_D_PATH=/etc/profile.d/setup-server-dev-path.sh
+install_profile_d_path() {
+  echo "=== Запись PATH в ${PROFILE_D_PATH} (uv, bun, Go) ==="
+  cat >"${PROFILE_D_PATH}" <<'EOF'
+# Создано setup-server.sh: uv (~/.local/bin), bun (~/.bun/bin), Go (/usr/local/go/bin)
+# Используется $HOME текущего пользователя при входе в систему.
+__setup_server_prepend_path() {
+  local d="$1"
+  [ -d "$d" ] || return 0
+  case ":${PATH:-}:" in
+    *:"$d":*) ;;
+    *) PATH="$d:$PATH" ;;
+  esac
+}
+__setup_server_prepend_path "$HOME/.local/bin"
+__setup_server_prepend_path "$HOME/.bun/bin"
+__setup_server_prepend_path "/usr/local/go/bin"
+export PATH
+unset -f __setup_server_prepend_path 2>/dev/null || true
+EOF
+  chmod 644 "${PROFILE_D_PATH}"
+}
+
 print_path_hints() {
   echo ""
-  echo "=== Готово. Добавьте в PATH (в ~/.bashrc или /etc/profile.d/local-path.sh) при необходимости ==="
-  echo "  export PATH=\"${TARGET_HOME}/.local/bin:\${PATH}\"          # uv"
-  echo "  export PATH=\"${TARGET_HOME}/.bun/bin:\${PATH}\"            # bun"
-  echo "  export PATH=\"/usr/local/go/bin:\${PATH}\"                  # go (если нет ссылок в /usr/local/bin)"
+  echo "=== Готово ==="
+  echo "PATH для uv / bun / Go записан в: ${PROFILE_D_PATH}"
+  echo "В этом же окне терминала выполните один раз:"
+  echo "  source ${PROFILE_D_PATH}"
+  echo "После этого: uv --version, bun --version"
   echo ""
   echo "Пакеты camoufox/pydoll в этот скрипт не входят — установите их в своём venv при необходимости."
   echo "Системные библиотеки для Firefox (Camoufox) см.: https://camoufox.com/python/installation/"
@@ -243,6 +288,7 @@ print_path_hints() {
 require_ubuntu
 install_native_batch
 install_docker
+ensure_docker_group
 install_node
 
 run_parallel_tooling
@@ -250,4 +296,5 @@ run_parallel_tooling
 export PATH="${TARGET_HOME}/.local/bin:${TARGET_HOME}/.bun/bin:/usr/local/go/bin:/usr/local/bin:${PATH}"
 install_pm2
 
+install_profile_d_path
 print_path_hints
